@@ -52,7 +52,7 @@ powershell.exe
 
 Arguments:
 
--ExecutionPolicy Bypass -File backup-notes.ps1 -ConfigPath "C:\path\to\config.json"
+-ExecutionPolicy Bypass -File backup.ps1 -ConfigPath "C:\path\to\config.json"
 
 
 Run as the same Windows user that created the SMTP credentials.
@@ -123,7 +123,7 @@ powershell.exe `
 - Add arguments:
 Use the real paths, example:
 
--NoProfile -ExecutionPolicy Bypass -File "C:\Repositories\NotesBackup\backup-notes.ps1" -ConfigPath "C:\Users\My\.notes-backup\config.json"
+-NoProfile -ExecutionPolicy Bypass -File "C:\Repositories\NotesBackup\backup.ps1" -ConfigPath "C:\Users\My\.notes-backup\config.json"
 
 
 - Start in:
