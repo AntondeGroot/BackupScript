@@ -38,94 +38,117 @@ function Send-StatusEmail($emailCfg, $subject, $body) {
 # Main
 # --------------------------
 $config = Get-Config $ConfigPath
+Write-Host "Backup jobs found: $($config.backups.Count)"
 
-$notesName    = $config.notesName
-$sourceFolder = $config.sourceFolder
-$backupFolder = $config.backupFolder
-$logFolder    = Join-Path $backupFolder $config.logFolderName
-
-New-DirectoryIfMissing $backupFolder
-New-DirectoryIfMissing $logFolder
-
-$logFile = Join-Path $logFolder ("backup-" + (Get-Date -Format "yyyy-MM-dd") + ".log")
-$successEmailSent = $false
-
-try {
-    Write-Log $logFile "Starting Notes backup..."
-    if (!(Test-Path $sourceFolder)) { throw "Source folder does not exist: $sourceFolder" }
-
-    $year  = (Get-Date).ToString("yy")
-    $month = (Get-Date).ToString("MM")
-    $day   = (Get-Date).ToString("dd")
-
-    $zipName = "$notesName-$year-$month-$day.zip"
-    $zipPath = Join-Path $backupFolder $zipName
-
-    if (Test-Path $zipPath) {
-        Remove-Item $zipPath -Force
-        Write-Log $logFile "Removed existing zip: $zipPath"
-    }
-
-    Write-Log $logFile "Compressing '$sourceFolder' to '$zipPath'..."
-    Compress-Archive -Path (Join-Path $sourceFolder "*") -DestinationPath $zipPath -CompressionLevel Optimal
-
-    if (!(Test-Path $zipPath)) { throw "ZIP file not created: $zipPath" }
-
-    $zipInfo = Get-Item $zipPath
-    $sizeMB  = [Math]::Round($zipInfo.Length / 1MB, 2)
-
-    Write-Log $logFile "Backup OK. Zip size: ${sizeMB} MB"
-
-    $subject = "Backup SUCCESSFUL for $notesName ($($zipInfo.Name))"
-    $body = @"
-Backup completed successfully for: $notesName
-
-Source: $sourceFolder
-Destination: $zipPath
-Size: ${sizeMB} MB
-Time: $(Get-Date)
-
-Log:
-$logFile
-"@
-
-    Send-StatusEmail $config.email $subject $body
-    $successEmailSent = $true
-    # Logging after email should not cause a failure email
-    try { Write-Log $logFile "Success email sent." } catch { }
-
-    exit 0
+if ($null -eq $config.backups -or $config.backups.Count -eq 0) {
+    throw "No backups defined in config.backups"
 }
-catch {
-    $err = $_.Exception.Message
-    Write-Log $logFile "ERROR: $err"
 
-    # If we already sent success, do NOT send failure as well
-    if ($successEmailSent) {
-        exit 1
-    }
+$results = @()
+$overallOk = $true
 
-    $subject = "Backup FAILED for $notesName ($(Get-Date -Format 'yyyy-MM-dd'))"
-    $body = @"
-Backup failed for: $notesName
+foreach ($backup in $config.backups) {
+    $backupName   = $backup.name
+    $sourceFolder = $backup.sourceFolder.Trim()
+    $backupFolder = $backup.backupFolder.Trim()
+    $logFolder    = Join-Path $backupFolder $config.logFolderName
 
-Source: $sourceFolder
-Destination folder: $backupFolder
-Time: $(Get-Date)
+    New-DirectoryIfMissing $backupFolder
+    New-DirectoryIfMissing $logFolder
 
-Error:
-$err
-
-Log:
-$logFile
-"@
+    $logFile = Join-Path $logFolder ("backup-" + $backupName + (Get-Date -Format "yyyy-MM-dd") + ".log")
+    $zipPath = $null
+    $sizeMB  = $null
 
     try {
-        Send-StatusEmail $config.email $subject $body
-        Write-Log $logFile "Failure email sent."
-    } catch {
-        Write-Log $logFile "ERROR sending failure email: $($_.Exception.Message)"
+        Write-Log $logFile "Starting Notes backup..."
+        if (!(Test-Path $sourceFolder)) { throw "Source folder does not exist: $sourceFolder" }
+        
+        $year  = (Get-Date).ToString("yy")
+        $month = (Get-Date).ToString("MM")
+        $day   = (Get-Date).ToString("dd")
+
+        $zipName = "$backupName-$year-$month-$day.zip"
+        $zipPath = Join-Path $backupFolder $zipName
+
+        if (Test-Path $zipPath) {
+            Remove-Item $zipPath -Force
+            Write-Log $logFile "Removed existing zip: $zipPath"
+        }
+
+        Write-Log $logFile "Compressing '$sourceFolder' to '$zipPath'..."
+        Compress-Archive -Path (Join-Path $sourceFolder "*") -DestinationPath $zipPath -CompressionLevel Optimal
+
+        if (!(Test-Path $zipPath)) { throw "ZIP file not created: $zipPath" }
+
+        $zipInfo = Get-Item $zipPath
+        $sizeMB  = [Math]::Round($zipInfo.Length / 1MB, 2)
+
+        Write-Log $logFile "Backup OK. Zip size: ${sizeMB} MB"
+
+        $results += [PSCustomObject]@{
+            Name = $backupName
+            Ok   = $true
+            Zip  = $zipPath
+            SizeMB = $sizeMB
+            Log   = $logFile
+            Error = $null
+        }
+    }
+    catch {
+        $overallOk = $false
+        $err = $_.Exception.Message
+        try { Write-Log $logFile "ERROR: $err" } catch {}
+
+        $results += [PSCustomObject]@{
+            Name = $backupName
+            Ok   = $false
+            Zip  = $zipPath
+            SizeMB = $sizeMB
+            Log  = $logFile
+            Error = $err
+        }
+    }
+}
+
+# ----- Send one summary email -----
+try {
+    $dateStr = Get-Date -Format "yyyy-MM-dd"
+    $failed = @($results | Where-Object { -not $_.Ok })
+    $ok = @($results | Where-Object { $_.Ok })
+
+    $subject = if ($overallOk) {
+        "Backups SUCCESSFUL ($dateStr) - $($ok.Count) jobs"
+    } else {
+        "Backups COMPLETED WITH FAILURES ($dateStr) - OK: $($ok.Count), Failed: $($failed.Count)!"
     }
 
+    $bodyLines = @()
+    $bodyLines += "Backup summary - $dateStr"
+    $bodyLines += ""
+    foreach ($r in $results) {
+        if ($r.Ok) {
+            $bodyLines += "   $($r.Name) - $($r.SizeMB) MB"
+            $bodyLines += "   Zip: $($r.Zip)"
+            $bodyLines += "   Log: $($r.Log)"
+        } else {
+            $bodyLines += "   $($r.Name)"
+            $bodyLines += "   Error: $($r.Error)"
+            $bodyLines += "   Log: $($r.Log)"
+        }
+        $bodyLines += ""
+    }
+
+    $body = ($bodyLines -join "`r`n")
+    Send-StatusEmail $config.email $subject $body
+}
+catch {
+    # Don’t hide backup results just because email failed
+    Write-Host "ERROR sending summary email: $($_.Exception.Message)"
+}
+
+if ($overallOk) {
+    exit 0
+} else {
     exit 1
 }
