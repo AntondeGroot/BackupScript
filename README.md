@@ -1,6 +1,6 @@
-# NotesBackup
+# Backup Script
 
-Simple PowerShell scripts to back up a notes folder (e.g. Obsidian) to a ZIP file and send an email with the backup status.
+Simple PowerShell scripts to back up a notes folder (in my case notes taken in Obsidian) to a ZIP file and send an email with the backup status.
 
 Designed to run automatically (monthly) using Windows Task Scheduler.
 
