@@ -30,8 +30,10 @@ function Get-ZipFileCount($zipPath) {
 }
 
 function Get-BackupStats($sourceFolder, $zipPath) {
-    # Timestamps stored in the zip are not reliable, so take the newest file from the source folder
+    # Timestamps stored in the zip are not reliable, so take the newest file from the source folder.
+    # Skip .obsidian: Obsidian rewrites its workspace files whenever the app is open.
     $newest = Get-ChildItem -Path $sourceFolder -File -Recurse |
+        Where-Object { $_.FullName -notmatch '[\\/]\.obsidian[\\/]' } |
         Sort-Object LastWriteTime -Descending |
         Select-Object -First 1
 
