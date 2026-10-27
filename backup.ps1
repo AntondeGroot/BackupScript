@@ -17,22 +17,28 @@ function Write-Log($logFile, $msg) {
     Add-Content -Path $logFile -Value $line
 }
 
-function Get-ZipContentStats($zipPath) {
+function Get-ZipFileCount($zipPath) {
     Add-Type -AssemblyName System.IO.Compression.FileSystem
     $zip = [System.IO.Compression.ZipFile]::OpenRead($zipPath)
     try {
         # Directory entries end with '/' and have no content; only count real files
-        $files  = @($zip.Entries | Where-Object { -not $_.FullName.EndsWith("/") })
-        $newest = $files | Sort-Object { $_.LastWriteTime } -Descending | Select-Object -First 1
-
-        return [PSCustomObject]@{
-            FileCount      = $files.Count
-            NewestFile     = if ($newest) { $newest.FullName } else { $null }
-            NewestModified = if ($newest) { $newest.LastWriteTime.DateTime } else { $null }
-        }
+        return @($zip.Entries | Where-Object { -not $_.FullName.EndsWith("/") }).Count
     }
     finally {
         $zip.Dispose()
+    }
+}
+
+function Get-BackupStats($sourceFolder, $zipPath) {
+    # Timestamps stored in the zip are not reliable, so take the newest file from the source folder
+    $newest = Get-ChildItem -Path $sourceFolder -File -Recurse |
+        Sort-Object LastWriteTime -Descending |
+        Select-Object -First 1
+
+    return [PSCustomObject]@{
+        FileCount      = Get-ZipFileCount $zipPath
+        NewestFile     = if ($newest) { $newest.FullName.Substring($sourceFolder.TrimEnd('\').Length + 1) } else { $null }
+        NewestModified = if ($newest) { $newest.LastWriteTime } else { $null }
     }
 }
 
@@ -112,7 +118,7 @@ foreach ($backup in $config.backups) {
         $zipInfo = Get-Item $zipPath
         $sizeMB  = [Math]::Round($zipInfo.Length / 1MB, 2)
 
-        $stats = Get-ZipContentStats $zipPath
+        $stats = Get-BackupStats $sourceFolder $zipPath
 
         Write-Log $logFile "Backup OK. Zip size: ${sizeMB} MB, files: $($stats.FileCount), newest: $($stats.NewestFile) ($($stats.NewestModified))"
 
@@ -166,7 +172,7 @@ try {
                 $newestStr = $r.Stats.NewestModified.ToString("yyyy-MM-dd HH:mm")
                 $bodyLines += "   Last modified: $newestStr ($(Format-Age $r.Stats.NewestModified)) - $($r.Stats.NewestFile)"
             } else {
-                $bodyLines += "   Last modified: n/a (zip contains no files!)"
+                $bodyLines += "   Last modified: n/a (source folder contains no files!)"
             }
             $bodyLines += "   Zip: $($r.Zip)"
             $bodyLines += "   Log: $($r.Log)"
