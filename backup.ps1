@@ -52,6 +52,157 @@ function Format-Age($date) {
     return "{0} months ago" -f [Math]::Floor($days / 30)
 }
 
+# --------------------------
+# Summary email (HTML)
+# Inline styles and layout tables only: many mail clients (Outlook, Gmail) drop <style> blocks.
+# --------------------------
+$EmailColors = @{
+    Ok         = "#1a7f37"
+    OkTint     = "#dafbe1"
+    Failed     = "#cf222e"
+    FailedTint = "#ffebe9"
+    Text       = "#1f2328"
+    Muted      = "#656d76"
+    Border     = "#e3e6ea"
+    Subtle     = "#f6f8fa"
+    Page       = "#eef1f4"
+}
+$EmailFont      = "-apple-system,'Segoe UI',Roboto,Helvetica,Arial,sans-serif"
+$EmailMonoFont  = "Consolas,Menlo,'Courier New',monospace"
+$EmailCardStyle = "background:#ffffff;border:1px solid $($EmailColors.Border);border-radius:10px;"
+
+function ConvertTo-HtmlText($value) {
+    return [System.Net.WebUtility]::HtmlEncode([string]$value)
+}
+
+function Format-Size($sizeMB) {
+    if ($sizeMB -ge 1024) { return "{0:N2} GB" -f ($sizeMB / 1024) }
+    return "{0:N1} MB" -f [double]$sizeMB
+}
+
+function Get-StatusTheme($ok) {
+    if ($ok) { return @{ Color = $EmailColors.Ok; Tint = $EmailColors.OkTint; Label = "OK"; Icon = "&#10003;" } }
+    return @{ Color = $EmailColors.Failed; Tint = $EmailColors.FailedTint; Label = "FAILED"; Icon = "!" }
+}
+
+function Format-StatTile($label, $valueHtml, $noteHtml) {
+    $labelStyle = "font-size:11px;font-weight:600;letter-spacing:.6px;text-transform:uppercase;color:$($EmailColors.Muted);"
+    $valueStyle = "font-size:16px;font-weight:600;color:$($EmailColors.Text);padding-top:3px;"
+    $noteStyle  = "font-size:12px;color:$($EmailColors.Muted);padding-top:1px;"
+    return "<td width=`"33%`" valign=`"top`" style=`"padding:12px 14px;background:$($EmailColors.Subtle);border-radius:8px;`">" +
+           "<div style=`"$labelStyle`">$label</div><div style=`"$valueStyle`">$valueHtml</div><div style=`"$noteStyle`">$noteHtml</div></td>"
+}
+
+function Format-StatRow($tiles) {
+    $spacer = "<td width=`"8`" style=`"width:8px;`"></td>"
+    return "<table role=`"presentation`" width=`"100%`" cellpadding=`"0`" cellspacing=`"0`"><tr>$($tiles -join $spacer)</tr></table>"
+}
+
+function Format-Notice($textHtml) {
+    $style = "margin-top:12px;padding:10px 14px;background:$($EmailColors.FailedTint);border-radius:8px;color:$($EmailColors.Failed);font-size:14px;"
+    return "<div style=`"$style`">$textHtml</div>"
+}
+
+function Format-PathList($paths) {
+    $labelStyle = "padding:2px 12px 2px 0;color:$($EmailColors.Muted);font-size:12px;vertical-align:top;"
+    $pathStyle  = "padding:2px 0;font-family:$EmailMonoFont;font-size:12px;color:$($EmailColors.Text);word-break:break-all;"
+    $rows = foreach ($label in $paths.Keys) {
+        "<tr><td style=`"$labelStyle`">$label</td><td style=`"$pathStyle`">$(ConvertTo-HtmlText $paths[$label])</td></tr>"
+    }
+    return "<div style=`"margin-top:14px;padding-top:10px;border-top:1px solid $($EmailColors.Border);`">" +
+           "<table role=`"presentation`" cellpadding=`"0`" cellspacing=`"0`">$($rows -join '')</table></div>"
+}
+
+function Format-LastChangeTile($stats) {
+    if (-not $stats.NewestModified) { return Format-StatTile "Last change" "&ndash;" "no files" }
+    $age = Format-Age $stats.NewestModified
+    $age = $age.Substring(0, 1).ToUpper() + $age.Substring(1)
+    return Format-StatTile "Last change" $age $stats.NewestModified.ToString("yyyy-MM-dd HH:mm")
+}
+
+function Format-JobBody($result) {
+    if (-not $result.Ok) {
+        return (Format-Notice (ConvertTo-HtmlText $result.Error)) + (Format-PathList ([ordered]@{ Log = $result.Log }))
+    }
+    $stats = $result.Stats
+    $body = Format-StatRow @(
+        (Format-StatTile "Size" (Format-Size $result.SizeMB) "zipped"),
+        (Format-StatTile "Files" ("{0:N0}" -f $stats.FileCount) "in archive"),
+        (Format-LastChangeTile $stats)
+    )
+    $paths = [ordered]@{}
+    if ($stats.NewestModified) { $paths.Latest = $stats.NewestFile }
+    else { $body += Format-Notice "Source folder contains no files!" }
+    $paths.Zip = $result.Zip
+    $paths.Log = $result.Log
+    return $body + (Format-PathList $paths)
+}
+
+function Format-JobCard($result) {
+    $theme = Get-StatusTheme $result.Ok
+    $pillStyle = "display:inline-block;padding:3px 10px;border-radius:999px;background:$($theme.Tint);color:$($theme.Color);font-size:11px;font-weight:700;letter-spacing:.6px;"
+    return @"
+<table role="presentation" width="100%" cellpadding="0" cellspacing="0" style="$EmailCardStyle margin:0 0 16px;">
+  <tr><td style="padding:18px 20px;">
+    <table role="presentation" width="100%" cellpadding="0" cellspacing="0" style="margin-bottom:14px;"><tr>
+      <td style="font-size:17px;font-weight:600;color:$($EmailColors.Text);">$(ConvertTo-HtmlText $result.Name)</td>
+      <td align="right"><span style="$pillStyle">$($theme.Label)</span></td>
+    </tr></table>
+    $(Format-JobBody $result)
+  </td></tr>
+</table>
+"@
+}
+
+function Format-TotalsRow($results) {
+    $ok = @($results | Where-Object { $_.Ok })
+    $totalMB = 0; $totalFiles = 0
+    foreach ($r in $ok) { $totalMB += $r.SizeMB; $totalFiles += $r.Stats.FileCount }
+    return Format-StatRow @(
+        (Format-StatTile "Jobs" "$($ok.Count) / $(@($results).Count)" "succeeded"),
+        (Format-StatTile "Total size" (Format-Size $totalMB) "zipped"),
+        (Format-StatTile "Total files" ("{0:N0}" -f $totalFiles) "backed up")
+    )
+}
+
+function Format-EmailHeader($results, $overallOk) {
+    $theme    = Get-StatusTheme $overallOk
+    $headline = if ($overallOk) { "All backups succeeded" } else { "Some backups failed" }
+    $date     = (Get-Date).ToString("dddd d MMMM yyyy", [System.Globalization.CultureInfo]::InvariantCulture)
+    $iconStyle = "width:44px;height:44px;border-radius:22px;background:$($theme.Color);color:#ffffff;font-size:22px;font-weight:700;line-height:44px;text-align:center;"
+    return @"
+<table role="presentation" width="100%" cellpadding="0" cellspacing="0" style="$EmailCardStyle border-top:4px solid $($theme.Color);margin:0 0 16px;">
+  <tr><td style="padding:22px 20px 20px;">
+    <table role="presentation" cellpadding="0" cellspacing="0" style="margin-bottom:18px;"><tr>
+      <td width="44" valign="middle"><div style="$iconStyle">$($theme.Icon)</div></td>
+      <td valign="middle" style="padding-left:14px;">
+        <div style="font-size:21px;font-weight:700;color:$($EmailColors.Text);">$headline</div>
+        <div style="font-size:13px;color:$($EmailColors.Muted);padding-top:2px;">$date &middot; $(ConvertTo-HtmlText $env:COMPUTERNAME)</div>
+      </td>
+    </tr></table>
+    $(Format-TotalsRow $results)
+  </td></tr>
+</table>
+"@
+}
+
+function Format-SummaryEmail($results, $overallOk) {
+    $cards = ($results | ForEach-Object { Format-JobCard $_ }) -join "`n"
+    return @"
+<!DOCTYPE html>
+<html><head><meta charset="utf-8"><meta name="viewport" content="width=device-width,initial-scale=1"></head>
+<body style="margin:0;padding:0;background:$($EmailColors.Page);">
+<table role="presentation" width="100%" cellpadding="0" cellspacing="0" style="background:$($EmailColors.Page);"><tr><td align="center" style="padding:28px 12px;">
+  <table role="presentation" width="100%" cellpadding="0" cellspacing="0" style="max-width:600px;font-family:$EmailFont;">
+    <tr><td>$(Format-EmailHeader $results $overallOk)</td></tr>
+    <tr><td>$cards</td></tr>
+    <tr><td style="padding:4px 0 8px;font-size:12px;color:$($EmailColors.Muted);text-align:center;">Sent by backup.ps1</td></tr>
+  </table>
+</td></tr></table>
+</body></html>
+"@
+}
+
 function Send-StatusEmail($emailCfg, $subject, $body) {
     if (!(Test-Path $emailCfg.credentialFile)) {
         throw "Credential file not found: $($emailCfg.credentialFile)"
@@ -63,6 +214,8 @@ function Send-StatusEmail($emailCfg, $subject, $body) {
         -To $emailCfg.to `
         -Subject $subject `
         -Body $body `
+        -BodyAsHtml `
+        -Encoding UTF8 `
         -SmtpServer $emailCfg.smtpServer `
         -Port $emailCfg.smtpPort `
         -UseSsl:([bool]$emailCfg.useSsl) `
@@ -163,30 +316,7 @@ try {
         "Backups COMPLETED WITH FAILURES ($dateStr) - OK: $($ok.Count), Failed: $($failed.Count)!"
     }
 
-    $bodyLines = @()
-    $bodyLines += "Backup summary - $dateStr"
-    $bodyLines += ""
-    foreach ($r in $results) {
-        if ($r.Ok) {
-            $bodyLines += "   $($r.Name) - $($r.SizeMB) MB"
-            $bodyLines += "   Files: $($r.Stats.FileCount)"
-            if ($r.Stats.NewestModified) {
-                $newestStr = $r.Stats.NewestModified.ToString("yyyy-MM-dd HH:mm")
-                $bodyLines += "   Last modified: $newestStr ($(Format-Age $r.Stats.NewestModified)) - $($r.Stats.NewestFile)"
-            } else {
-                $bodyLines += "   Last modified: n/a (source folder contains no files!)"
-            }
-            $bodyLines += "   Zip: $($r.Zip)"
-            $bodyLines += "   Log: $($r.Log)"
-        } else {
-            $bodyLines += "   $($r.Name)"
-            $bodyLines += "   Error: $($r.Error)"
-            $bodyLines += "   Log: $($r.Log)"
-        }
-        $bodyLines += ""
-    }
-
-    $body = ($bodyLines -join "`r`n")
+    $body = Format-SummaryEmail $results $overallOk
     Send-StatusEmail $config.email $subject $body
 }
 catch {
